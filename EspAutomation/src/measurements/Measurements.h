@@ -12,10 +12,10 @@ class Measurement{
 
 class AbstractMeasurementChannel{
     public:
-    virtual Measurement getLastMeasurement()=0;
-    virtual MeasType getMin()=0; //lowest Value that can occur
-    virtual MeasType getMax()=0; //highest Value that can occur
-    virtual const char* getShortName()=0;// some concise human readable identifier ("InletTempertature")
-    virtual const char* getDescription()=0;// some human readable description of arbitrary length 
-    virtual const char* getUnit()=0; // unit of measurement
+    virtual Measurement getLastMeasurement()const =0;
+    virtual MeasType getMin() const =0; //lowest Value that can occur
+    virtual MeasType getMax()const =0; //highest Value that can occur
+    virtual const char* getShortName()const =0;// some concise human readable identifier ("InletTempertature")
+    virtual const char* getDescription()const =0;// some human readable description of arbitrary length 
+    virtual const char* getUnit()const =0; // unit of measurement
 };

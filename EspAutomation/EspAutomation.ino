@@ -32,8 +32,8 @@ WebFormDebugElement debugSection(&server);
 //////////////Here comes the actual automation
 
 ////Time related things
-#define NTP_SERVER     "pool.ntp.org"
-#define UTC_OFFSET     0
+#define NTP_SERVER "pool.ntp.org"
+#define UTC_OFFSET 0
 #define UTC_OFFSET_DST 0
 
 #include <time.h>
@@ -42,16 +42,16 @@ SystemTimeBase timeBase; // this is what we use while the code is running
 
 #include <Wire.h>
 #include <RTClib.h> // this one we use to set the time once on startup
-#define rtcClockPin 3
-#define rtcDataPin 4
+#define rtcClockPin 21
+#define rtcDataPin 22
 
 // read external RTC to set internal clock
 void setSytemClockFromRtc()
 {
     TwoWire rtcWire(0);
     RTC_DS3231 rtc;
-    rtcWire.begin(rtcDataPin, rtcClockPin, 100000);
-    if (!rtc.begin())
+    rtcWire.begin(rtcDataPin, rtcClockPin, 10000);
+    if (!rtc.begin(&rtcWire))
     {
         Serial.println(F("Couldn't find RTC!"));
         return;
@@ -59,9 +59,14 @@ void setSytemClockFromRtc()
     if (rtc.lostPower())
     {
         Serial.println(F("RTC lost power,you need to set the time!"));
+        rtc.adjust(DateTime(1718298024));
         return;
     }
     DateTime now = rtc.now();
+    char datebuffer[] = "DDD, DD MMM YYYY hh:mm:ss";
+    now.toString(datebuffer); // this crashes unfortunately
+    Serial.print("Time read from RTC is: ");
+    Serial.println(datebuffer);
     timeval curTime;
     curTime.tv_sec = now.unixtime(); // not year 2038 save!
     curTime.tv_usec = 0;
@@ -82,24 +87,33 @@ const char *valveControllerNames[] = {"/schedules/valve1", "/schedules/valve2", 
 ScheduledOnOffController valveControllers[nValves];
 
 //////////Measurements and logging
-int sdCsPin=25;
-#include <list>
+int sdCsPin = 25;
+#include <vector>
 #include "src/measurements/Measurements.h"
-#include "src/measurements/SdCardMeasurementLogger.h"
-#include "src/measurements/MeasurementRecordBuffer.h"
-#include "src/measurements/DummyMeasurementChannel.h"
+#include "src/measurements/BufferedChannelCollection.h"
+#include "src/measurements/sources/DummyMeasurementChannel.h"
+#include "src/measurements/logging/LogTargets.h"
+#include "src/measurements/logging/SdCardLogTarget.h"
+#include "src/measurements/logging/BufferedMeasurementLogger.h"
+
+#include "src/measurements/web/MeasurementChannelWebDisplayTable.h"
+#include "src/measurements/web/ChannelCollectionWebView.h"
 DummyMeasurementChannel counterChannel;
-std::list<AbstractMeasurementChannel*> measurementChannelList; // here we keep all out measurements
-MeasurementRecordBuffer measurementBuffer; // we use this to keep a number of past measurements in memory (i.e. for displaying them in a graph)
-SdCardMeasurementLogger measurementLogger;
+std::vector<AbstractMeasurementChannel *> measurementChannels; // here we keep all out measurements
+BufferedChannelCollection measurementBuffer;                   // we use this to keep a number of past measurements in memory (i.e. for displaying them in a graph)
+SdCardLogTarget logTargetSd;
+SerialLogTarget logTargetSerial;
+BufferedMeasurementLogger measurementLogger;
+WebFormHtmlPage sensorPage("Sensor States");
+MeasurementChannelWebDisplayTable sensorTable;
+ChannelCollectionWebView sensorWebDisplay(&measurementBuffer);
+void downloadLogFile(); // instruct the server to download the logfile
 
 void setup()
 {
     Serial.begin(115200);
-    delay(500);
     setSytemClockFromRtc();
-      configTime(UTC_OFFSET, UTC_OFFSET_DST, NTP_SERVER);
-
+    // configTime(UTC_OFFSET, UTC_OFFSET_DST, NTP_SERVER);
     // set up parameter infrastructure
     ArduPar3Collection::globalDefaultCollection = &parameterCollection; // use our parameter collection as a default
     dumpCallbackParameter.setup(PSTR("/commands/dump"), PSTR("Print Parameter Summary"), []
@@ -117,8 +131,7 @@ void setup()
         valveControllers[i].setup(&valveActuators[i], valveControllerNames[i], "On/Off Schedule", &timeBase, ScheduledOnOffController::ScheduleTimeBaseHours, 0, 24, 1);
     }
     /// try to get connected to a WiFi
-    setupWifi(WIFI_SSID ,WIFI_PASSWORD);
-
+    setupWifi(WIFI_SSID, WIFI_PASSWORD);
     /// setup server
     server.on("/", serveArduParFormUi);
     server.onNotFound(notFound);
@@ -128,36 +141,49 @@ void setup()
     arduParUi.buildUi(ArduPar3Collection::globalDefaultCollection, "/");
 
     parameterCollection.loadAll();
-    parameterCollection.dumpParameterInfos(&Serial);
+    //parameterCollection.dumpParameterInfos(&Serial);
+
     // set up measurements and logging
-    measurementChannelList.push_back(&counterChannel);
-    measurementBuffer.initialize(&measurementChannelList,128);
-    measurementLogger.setup("/test.txt",sdCsPin,&measurementBuffer);
-    measurementLogger.recordsPerSdWriteInterval=100;
+    measurementChannels.reserve(1);
+    measurementChannels.push_back(&counterChannel);
+    measurementBuffer.setup(&measurementChannels, 128);
+    measurementBuffer.minPushIntervalMillis = 10;
+    logTargetSd.setup("/test.txt", sdCsPin);
+    measurementLogger.setup(&measurementBuffer, &logTargetSd);
+
+    // set up page for displaying sensor values
+    sensorTable.channels = measurementChannels;
+    sensorPage.uiElements.push_back(&sensorWebDisplay);
+    server.on("/sense", []()
+              { sensorPage.serveYourself(server); });
+             
+    // allow logfile download
+    server.on("/log", downloadLogFile);
 }
 
 void loop()
 {
     // run measurements and logging
     counterChannel.update();
-    measurementBuffer.saveRecord();
+    measurementBuffer.pushMeasurementsToBufferInterval();
     measurementLogger.update();
     // update parameters from web and serial
 
     parameterCollection.updateParametersFromStream(&Serial, 1000);
     server.handleClient();
-
-    // update controllers + actuators
-    Serial.print("Hours of year:\t");
-    Serial.print(timeBase.getHoursOfTheDay());
-    Serial.print("\tValve States:\t");
-    for (int i = 0; i < nValves; i++)
-    {
-        Serial.print(valvePins[i].getOutput());
-        Serial.print("\t");
-        valveControllers[i].update();
-    }
-    Serial.print("\n");
+    /*
+        // update controllers + actuators
+        Serial.print("Hours of year:\t");
+        Serial.print(timeBase.getHoursOfTheDay());
+        Serial.print("\tValve States:\t");
+        for (int i = 0; i < nValves; i++)
+        {
+            Serial.print(valvePins[i].getOutput());
+            Serial.print("\t");
+            valveControllers[i].update();
+        }
+        Serial.print("\n");
+        */
     delay(2); // allow the cpu to switch to other tasks
 }
 
@@ -232,4 +258,22 @@ void notFound()
         message += " " + server.argName(i) + ": " + server.arg(i) + "\n";
     }
     server.send(404, "text/plain", message);
+}
+// instruct the server to download the logfile
+void downloadLogFile()
+{
+    File download = SD.open(logTargetSd.getFilename(), "r");
+    if (download)
+    {
+        server.sendHeader("Content-Type", "text/text");
+        server.sendHeader("Content-Disposition", String("attachment; filename=") + logTargetSd.getFilename());
+        server.sendHeader("Connection", "close");
+        server.streamFile(download, "application/octet-stream");
+        download.close();
+    }
+    else
+    {
+        String message = "Couldn't open file for download.\n";
+        server.send(404, "text/plain", message);
+    }
 }

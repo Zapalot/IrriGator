@@ -1,6 +1,6 @@
 #pragma once
 #include "HX710Array.h"
-#include "Measurements.h"
+#include "../Measurements.h"
 class HX710BSensorChannelArray
 {
 };
